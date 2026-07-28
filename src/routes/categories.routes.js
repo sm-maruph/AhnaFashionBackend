@@ -4,7 +4,7 @@ const { authenticate, requireAdmin } = require("../middleware/auth");
 const { supabaseAdmin } = require("../config/supabase");
 const { validate } = require("../middleware/validate");
 const { upload } = require("../middleware/upload");
-const { processMany } = require("../utils/image");
+const { processMany, removePublicImages } = require("../utils/image");
 const { z } = require("zod");
 
 const router = express.Router();
@@ -96,9 +96,15 @@ router.put("/:id", authenticate, requireAdmin, upload.single("image"), validate(
 }));
 
 router.delete("/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const { data: category, error: findError } = await supabaseAdmin
+    .from("categories").select("id,image").eq("id", req.params.id).maybeSingle();
+  if (findError) throw findError;
+  if (!category) return res.status(404).json({ error: "Category not found" });
+
+  const deletedImages = await removePublicImages("category-images", [category.image]);
   const { error } = await supabaseAdmin.from("categories").delete().eq("id", req.params.id);
   if (error) throw error;
-  res.status(204).send();
+  res.json({ success: true, deletedImages });
 }));
 
 // ---- Category Groups ----

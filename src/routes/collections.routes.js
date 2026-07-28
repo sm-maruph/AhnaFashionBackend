@@ -2,7 +2,7 @@ const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const { authenticate, requireAdmin } = require("../middleware/auth");
 const { upload } = require("../middleware/upload");
-const { processMany } = require("../utils/image");
+const { processMany, removePublicImages } = require("../utils/image");
 const { supabaseAdmin } = require("../config/supabase");
 
 const router = express.Router();
@@ -51,9 +51,15 @@ router.put("/:id", authenticate, requireAdmin, upload.single("image"), asyncHand
 }));
 
 router.delete("/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const { data: collection, error: findError } = await supabaseAdmin
+    .from("collections").select("id,image").eq("id", req.params.id).maybeSingle();
+  if (findError) throw findError;
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const deletedImages = await removePublicImages("banners", [collection.image]);
   const { error } = await supabaseAdmin.from("collections").delete().eq("id", req.params.id);
   if (error) throw error;
-  res.json({ success: true });
+  res.json({ success: true, deletedImages });
 }));
 
 module.exports = router;

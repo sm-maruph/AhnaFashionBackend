@@ -119,4 +119,21 @@ router.patch("/:id/status", authenticate, requireAdmin, asyncHandler(async (req,
   res.json(data);
 }));
 
+// DELETE /api/orders/:id  (admin)
+router.delete("/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const { data: order, error: findError } = await supabaseAdmin
+    .from("orders")
+    .select("id")
+    .eq("id", req.params.id)
+    .maybeSingle();
+  if (findError) throw findError;
+  if (!order) return res.status(404).json({ error: "Order not found" });
+
+  // order_items are removed by the database FK's ON DELETE CASCADE.
+  // Their image values are shared product URLs, so Storage files stay intact.
+  const { error } = await supabaseAdmin.from("orders").delete().eq("id", req.params.id);
+  if (error) throw error;
+  res.json({ success: true });
+}));
+
 module.exports = router;

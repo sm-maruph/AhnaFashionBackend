@@ -63,4 +63,42 @@ async function processMany(bucket, files, opts = {}) {
   return Promise.all(files.map((f) => processAndUpload(bucket, f.buffer, opts)));
 }
 
-module.exports = { processAndUpload, processMany, toWebp };
+// Convert a URL returned by Supabase getPublicUrl() back to the object path
+// expected by storage.remove(). Unknown/external URLs are deliberately ignored.
+function storagePathFromPublicUrl(publicUrl, bucket) {
+  if (!publicUrl || !bucket) return null;
+
+  try {
+    const pathname = new URL(publicUrl).pathname;
+    const marker = `/storage/v1/object/public/${bucket}/`;
+    const markerIndex = pathname.indexOf(marker);
+    if (markerIndex === -1) return null;
+
+    const path = decodeURIComponent(pathname.slice(markerIndex + marker.length));
+    if (!path || path.startsWith("/") || path.split("/").some((part) => part === "." || part === "..")) {
+      return null;
+    }
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+async function removePublicImages(bucket, publicUrls) {
+  const paths = [...new Set(
+    publicUrls.map((url) => storagePathFromPublicUrl(url, bucket)).filter(Boolean)
+  )];
+  if (!paths.length) return 0;
+
+  const { error } = await supabaseAdmin.storage.from(bucket).remove(paths);
+  if (error) throw error;
+  return paths.length;
+}
+
+module.exports = {
+  processAndUpload,
+  processMany,
+  removePublicImages,
+  storagePathFromPublicUrl,
+  toWebp,
+};

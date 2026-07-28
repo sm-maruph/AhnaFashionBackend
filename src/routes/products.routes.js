@@ -4,7 +4,7 @@ const { loadLiveCampaigns, applySaleToProduct } = require("../utils/salePricing"
 const { validate } = require("../middleware/validate");
 const { requireAdmin, authenticate } = require("../middleware/auth");
 const { upload } = require("../middleware/upload");
-const { processMany } = require("../utils/image");
+const { processMany, storagePathFromPublicUrl } = require("../utils/image");
 const { supabaseAdmin } = require("../config/supabase");
 const { productCreate, productUpdate, listQuery } = require("../validators/schemas");
 
@@ -110,9 +110,35 @@ router.put("/:id", authenticate, requireAdmin, upload.array("images", 8),
 
 // DELETE /api/products/:id  (admin)
 router.delete("/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const bucket = "product-images";
+  const [
+    { data: product, error: productError },
+    { data: gallery, error: galleryError },
+  ] = await Promise.all([
+    supabaseAdmin.from("products").select("id,image").eq("id", req.params.id).maybeSingle(),
+    supabaseAdmin.from("product_images").select("url").eq("product_id", req.params.id),
+  ]);
+
+  if (productError) throw productError;
+  if (galleryError) throw galleryError;
+  if (!product) return res.status(404).json({ error: "Product not found" });
+
+  // The cover image is also present in product_images, so deduplicate paths.
+  const imageUrls = [product.image, ...(gallery || []).map((image) => image.url)];
+  const imagePaths = [...new Set(
+    imageUrls.map((url) => storagePathFromPublicUrl(url, bucket)).filter(Boolean)
+  )];
+
+  // Remove files first. If Storage fails, keep the product row so deletion can
+  // be retried instead of silently leaving orphaned files in the bucket.
+  if (imagePaths.length) {
+    const { error: storageError } = await supabaseAdmin.storage.from(bucket).remove(imagePaths);
+    if (storageError) throw storageError;
+  }
+
   const { error } = await supabaseAdmin.from("products").delete().eq("id", req.params.id);
   if (error) throw error;
-  res.json({ success: true });
+  res.json({ success: true, deletedImages: imagePaths.length });
 }));
 
 module.exports = router;

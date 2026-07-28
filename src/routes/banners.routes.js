@@ -2,7 +2,7 @@ const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const { authenticate, requireAdmin } = require("../middleware/auth");
 const { upload } = require("../middleware/upload");
-const { processMany } = require("../utils/image");
+const { processMany, removePublicImages } = require("../utils/image");
 const { supabaseAdmin } = require("../config/supabase");
 
 const router = express.Router();
@@ -51,9 +51,15 @@ router.put("/:id", authenticate, requireAdmin, upload.single("image"), asyncHand
 }));
 
 router.delete("/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const { data: banner, error: findError } = await supabaseAdmin
+    .from("banners").select("id,image").eq("id", req.params.id).maybeSingle();
+  if (findError) throw findError;
+  if (!banner) return res.status(404).json({ error: "Banner not found" });
+
+  const deletedImages = await removePublicImages("banners", [banner.image]);
   const { error } = await supabaseAdmin.from("banners").delete().eq("id", req.params.id);
   if (error) throw error;
-  res.json({ success: true });
+  res.json({ success: true, deletedImages });
 }));
 
 module.exports = router;
