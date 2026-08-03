@@ -23,6 +23,21 @@ router.get("/", authenticate, requireAdmin, asyncHandler(async (_req, res) => {
     (products || []).forEach((p) => { p.low_stock_threshold = 5; });
   }
 
+  const productIds = (products || []).map((p) => p.id);
+  let variantRows = [];
+  if (productIds.length) {
+    const { data, error } = await supabaseAdmin.from("product_size_inventory")
+      .select("id,product_id,size_id,stock,size:sizes(id,name,sort_order)").in("product_id", productIds);
+    if (error) throw error;
+    variantRows = data || [];
+  }
+  const variantsByProduct = new Map();
+  for (const variant of variantRows) {
+    if (!variant.size) continue;
+    if (!variantsByProduct.has(variant.product_id)) variantsByProduct.set(variant.product_id, []);
+    variantsByProduct.get(variant.product_id).push({ id: variant.id, sizeId: variant.size_id, name: variant.size.name, stock: Number(variant.stock || 0), sortOrder: variant.size.sort_order });
+  }
+
   // 2) order_items + a separate map of order_id -> status (avoids nested-join FK issues)
   const { data: items, error: iErr } = await supabaseAdmin
     .from("order_items")
@@ -49,7 +64,8 @@ router.get("/", authenticate, requireAdmin, asyncHandler(async (_req, res) => {
   const rows = (products || []).map((p) => {
     const s = stat.get(p.id) || { byStatus: {}, orderedQty: 0, cancelledQty: 0, activeQty: 0 };
     const threshold = p.low_stock_threshold ?? 5;
-    const stock = Number(p.stock || 0);
+    const variants = (variantsByProduct.get(p.id) || []).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const stock = variants.length ? variants.reduce((sum, v) => sum + v.stock, 0) : Number(p.stock || 0);
     let level = "ok";
     if (stock <= 0) level = "out";
     else if (stock <= threshold) level = "low";
@@ -59,11 +75,36 @@ router.get("/", authenticate, requireAdmin, asyncHandler(async (_req, res) => {
       id: p.id, name: p.name, image: p.image, price: Number(p.price || 0),
       stock, threshold, level,
       orderedQty: s.orderedQty, activeQty: s.activeQty, cancelledQty: s.cancelledQty,
-      byStatus: s.byStatus, suggestedRestock,
+      byStatus: s.byStatus, suggestedRestock, variants,
     };
   });
 
   res.json({ items: rows });
+}));
+
+// PATCH /api/inventory/variant/:id — absolute stock for one product size.
+router.patch("/variant/:id", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const stock = Math.max(0, parseInt(req.body.stock, 10) || 0);
+  const { data, error } = await supabaseAdmin.from("product_size_inventory")
+    .update({ stock }).eq("id", req.params.id).select("id,product_id,size_id,stock").single();
+  if (error) throw error;
+  const { data: variants } = await supabaseAdmin.from("product_size_inventory").select("stock").eq("product_id", data.product_id);
+  const total = (variants || []).reduce((sum, row) => sum + Number(row.stock || 0), 0);
+  await supabaseAdmin.from("products").update({ stock: total }).eq("id", data.product_id);
+  res.json({ ...data, product_stock: total });
+}));
+
+router.post("/variant/:id/restock", authenticate, requireAdmin, asyncHandler(async (req, res) => {
+  const add = Math.max(0, parseInt(req.body.amount, 10) || 0);
+  const { data: current, error: findError } = await supabaseAdmin.from("product_size_inventory").select("stock").eq("id", req.params.id).single();
+  if (findError) throw findError;
+  req.body.stock = Number(current.stock || 0) + add;
+  const { data, error } = await supabaseAdmin.from("product_size_inventory").update({ stock: req.body.stock }).eq("id", req.params.id).select("id,product_id,size_id,stock").single();
+  if (error) throw error;
+  const { data: variants } = await supabaseAdmin.from("product_size_inventory").select("stock").eq("product_id", data.product_id);
+  const total = (variants || []).reduce((sum, row) => sum + Number(row.stock || 0), 0);
+  await supabaseAdmin.from("products").update({ stock: total }).eq("id", data.product_id);
+  res.json({ ...data, product_stock: total });
 }));
 
 // PATCH /api/inventory/:id  (admin) — set absolute stock and/or threshold

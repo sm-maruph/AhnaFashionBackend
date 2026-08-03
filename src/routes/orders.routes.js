@@ -9,6 +9,10 @@ const { orderSchema } = require("../validators/schemas");
 
 const router = express.Router();
 const DELIVERY = { inside_dhaka: 80, outside_dhaka: 120 };
+const syncProductStock = async (productId) => {
+  const { data } = await supabaseAdmin.from("product_size_inventory").select("stock").eq("product_id", productId);
+  if (data?.length) await supabaseAdmin.from("products").update({ stock: data.reduce((sum, row) => sum + Number(row.stock || 0), 0) }).eq("id", productId);
+};
 
 // POST /api/orders  (guest or logged-in) — totals computed SERVER-SIDE (never trust client)
 router.post("/", optionalAuth, validate(orderSchema), asyncHandler(async (req, res) => {
@@ -50,6 +54,7 @@ router.post("/", optionalAuth, validate(orderSchema), asyncHandler(async (req, r
     p_items: b.items,
   });
   if (error) throw error;
+  for (const productId of [...new Set(b.items.map((item) => item.product_id).filter(Boolean))]) await syncProductStock(productId);
   // Coupon consumed — bump its usage counter (best effort)
   if (appliedCoupon) await incrementCouponUsage(appliedCoupon.id);
 
@@ -105,11 +110,28 @@ router.patch("/:id/status", authenticate, requireAdmin, asyncHandler(async (req,
   //  - moving OUT of Cancelled -> re-decrement items (subtract again)
   if (next === "Cancelled" && !wasCancelled) {
     await supabaseAdmin.rpc("restock_order", { p_order_id: req.params.id });
+    const { data: items } = await supabaseAdmin.from("order_items").select("product_id,size,qty").eq("order_id", req.params.id);
+    for (const it of items || []) {
+      if (!it.product_id || !it.size) continue;
+      const { data: variant } = await supabaseAdmin.from("product_size_inventory")
+        .select("id,stock,size:sizes!inner(name)").eq("product_id", it.product_id).eq("size.name", it.size).maybeSingle();
+      if (variant) await supabaseAdmin.from("product_size_inventory").update({ stock: Number(variant.stock || 0) + Number(it.qty || 0) }).eq("id", variant.id);
+      await syncProductStock(it.product_id);
+    }
   } else if (wasCancelled && next !== "Cancelled") {
     // re-apply the original deduction
-    const { data: items } = await supabaseAdmin.from("order_items").select("product_id, qty").eq("order_id", req.params.id);
+    const { data: items } = await supabaseAdmin.from("order_items").select("product_id, size, qty").eq("order_id", req.params.id);
     for (const it of items || []) {
       if (!it.product_id) continue;
+      if (it.size) {
+        const { data: variant } = await supabaseAdmin.from("product_size_inventory")
+          .select("id,stock,size:sizes!inner(name)").eq("product_id", it.product_id).eq("size.name", it.size).maybeSingle();
+        if (variant) {
+          await supabaseAdmin.from("product_size_inventory").update({ stock: Math.max(0, Number(variant.stock || 0) - Number(it.qty || 0)) }).eq("id", variant.id);
+          await syncProductStock(it.product_id);
+          continue;
+        }
+      }
       const { data: prod } = await supabaseAdmin.from("products").select("stock").eq("id", it.product_id).single();
       const newStock = Math.max(0, Number(prod?.stock || 0) - Number(it.qty || 0));
       await supabaseAdmin.from("products").update({ stock: newStock }).eq("id", it.product_id);

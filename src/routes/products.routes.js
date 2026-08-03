@@ -12,6 +12,75 @@ const router = express.Router();
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 const asArray = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
 const asJson = (v) => { if (Array.isArray(v)) return v; try { return JSON.parse(v || "[]"); } catch { return []; } };
+const withSizeVariants = async (products) => {
+  const list = Array.isArray(products) ? products : [products];
+  const ids = list.map((p) => p?.id).filter(Boolean);
+  if (!ids.length) return products;
+  const [{ data, error }, { data: productLinks, error: linkError }] = await Promise.all([
+    supabaseAdmin.from("product_size_inventory").select("id,product_id,size_id,stock,size:sizes(id,name,sort_order,is_active)").in("product_id", ids),
+    supabaseAdmin.from("products").select("id,size_chart_id").in("id", ids),
+  ]);
+  if (error) throw error;
+  if (linkError) throw linkError;
+  const chartIds = [...new Set((productLinks || []).map((p) => p.size_chart_id).filter(Boolean))];
+  let charts = [];
+  if (chartIds.length) {
+    const { data: chartData, error: chartError } = await supabaseAdmin.from("size_charts").select("id,heading,note,columns,rows,is_active").in("id", chartIds);
+    if (chartError) throw chartError;
+    charts = chartData || [];
+  }
+  const chartById = new Map(charts.map((c) => [c.id, c]));
+  const chartIdByProduct = new Map((productLinks || []).map((p) => [p.id, p.size_chart_id]));
+  const byProduct = new Map();
+  for (const row of data || []) {
+    if (!row.size) continue;
+    const item = { id: row.id, size_id: row.size_id, name: row.size.name, stock: Number(row.stock || 0), sort_order: row.size.sort_order };
+    if (!byProduct.has(row.product_id)) byProduct.set(row.product_id, []);
+    byProduct.get(row.product_id).push(item);
+  }
+  list.forEach((p) => {
+    p.size_chart_id = chartIdByProduct.get(p.id) || null;
+    p.size_chart = chartById.get(p.size_chart_id) || null;
+    p.size_variants = (byProduct.get(p.id) || []).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+    if (p.size_variants.length) {
+      p.sizes = p.size_variants.map((v) => v.name);
+      p.stock = p.size_variants.reduce((sum, v) => sum + v.stock, 0);
+      p.in_stock = p.stock > 0;
+    }
+  });
+  return products;
+};
+
+const saveSizeVariants = async (productId, raw) => {
+  if (raw === undefined) return;
+  const incoming = asJson(raw).filter((v) => v && (v.size_id || String(v.name || "").trim()));
+  const variants = [];
+  for (let index = 0; index < incoming.length; index += 1) {
+    const variant = incoming[index];
+    let sizeId = variant.size_id;
+    const name = String(variant.name || "").trim();
+    if (!sizeId && name) {
+      const { data: existing, error: findError } = await supabaseAdmin.from("sizes").select("id").ilike("name", name).maybeSingle();
+      if (findError) throw findError;
+      if (existing) sizeId = existing.id;
+      else {
+        const { data: created, error: createError } = await supabaseAdmin.from("sizes")
+          .insert({ name, sort_order: index, is_active: true }).select("id").single();
+        if (createError) throw createError;
+        sizeId = created.id;
+      }
+    }
+    if (sizeId) variants.push({ size_id: sizeId, stock: Math.max(0, Number(variant.stock) || 0) });
+  }
+  const { error: deleteError } = await supabaseAdmin.from("product_size_inventory").delete().eq("product_id", productId);
+  if (deleteError) throw deleteError;
+  if (variants.length) {
+    const rows = variants.map((v) => ({ product_id: productId, ...v }));
+    const { error } = await supabaseAdmin.from("product_size_inventory").insert(rows);
+    if (error) throw error;
+    await supabaseAdmin.from("products").update({ stock: rows.reduce((s, v) => s + v.stock, 0) }).eq("id", productId);
+  }
+};
 
 // GET /api/products  (public, paginated, filtered) — selects only needed columns
 router.get("/", validate(listQuery, "query"), asyncHandler(async (req, res) => {
@@ -35,6 +104,7 @@ router.get("/", validate(listQuery, "query"), asyncHandler(async (req, res) => {
   const { data, count, error } = await q.range(from, to);
   if (error) throw error;
   const { live, linksByCamp } = await loadLiveCampaigns();
+  await withSizeVariants(data || []);
   const items = (data || []).map((p) => applySaleToProduct(p, live, linksByCamp));
   res.json({ items, total: count, page, pageSize });
 }));
@@ -49,6 +119,7 @@ router.get("/:slug", asyncHandler(async (req, res) => {
     .single();
   if (error || !data) return res.status(404).json({ error: "Product not found" });
   const { live, linksByCamp } = await loadLiveCampaigns();
+  await withSizeVariants(data);
   res.json(applySaleToProduct(data, live, linksByCamp));
 }));
 
@@ -65,12 +136,13 @@ router.post("/", authenticate, requireAdmin, upload.array("images", 8),
       name: b.name, brand: b.brand, description: b.description,
       slug: b.slug || slugify(b.name),
       category_id: b.category_id || null, subcategory_id: b.subcategory_id || null,
-      price: b.price, old_price: b.old_price ?? null, stock: b.stock,
+      price: b.price, old_price: b.old_price ?? null, stock: b.stock, size_chart_id: b.size_chart_id || null,
       sizes: asArray(b.sizes), colors: asJson(b.colors), tags: asArray(b.tags),
       image: uploaded[0]?.url || null,
     };
     const { data: product, error } = await supabaseAdmin.from("products").insert(insert).select().single();
     if (error) throw error;
+    await saveSizeVariants(product.id, b.size_variants);
 
     // 3) gallery rows
     if (uploaded.length) {
@@ -86,8 +158,8 @@ router.put("/:id", authenticate, requireAdmin, upload.array("images", 8),
   validate(productUpdate), asyncHandler(async (req, res) => {
     const b = req.body;
     const patch = {};
-    ["name", "brand", "description", "slug", "category_id", "subcategory_id", "price", "old_price", "stock"].forEach((k) => {
-      if (b[k] !== undefined) patch[k] = b[k];
+    ["name", "brand", "description", "slug", "category_id", "subcategory_id", "price", "old_price", "stock", "size_chart_id"].forEach((k) => {
+      if (b[k] !== undefined) patch[k] = k === "size_chart_id" ? (b[k] || null) : b[k];
     });
     if (b.sizes !== undefined) patch.sizes = asArray(b.sizes);
     if (b.colors !== undefined) patch.colors = asJson(b.colors);
@@ -104,6 +176,7 @@ router.put("/:id", authenticate, requireAdmin, upload.array("images", 8),
 
     const { data, error } = await supabaseAdmin.from("products").update(patch).eq("id", req.params.id).select().single();
     if (error) throw error;
+    await saveSizeVariants(req.params.id, b.size_variants);
     res.json(data);
   })
 );

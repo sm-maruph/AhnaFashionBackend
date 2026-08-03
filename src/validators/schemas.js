@@ -15,6 +15,8 @@ const productCreate = z.object({
   old_price: optNum,
   stock: z.coerce.number().int().nonnegative().default(0),
   sizes: z.union([z.array(z.string()), z.string()]).optional(),   // CSV or array
+  size_variants: z.union([z.array(z.any()), z.string()]).optional(),
+  size_chart_id: z.union([z.string().uuid(), z.literal("")]).optional().nullable(),
   colors: z.union([z.array(z.any()), z.string()]).optional(),     // JSON string or array
   tags: z.union([z.array(z.string()), z.string()]).optional(),
 });

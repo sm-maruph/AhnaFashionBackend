@@ -22,6 +22,14 @@ router.post("/", asyncHandler(async (req, res) => {
   const { product_id, size = null, color = null, qty = 1 } = req.body;
   if (!product_id) return res.status(400).json({ error: "product_id required" });
 
+  if (size) {
+    const { data: variant, error: variantError } = await supabaseAdmin.from("product_size_inventory")
+      .select("stock,size:sizes!inner(name)").eq("product_id", product_id).eq("size.name", size).maybeSingle();
+    if (variantError) throw variantError;
+    if (!variant) return res.status(400).json({ error: "This size is not available for the product" });
+    if (Number(variant.stock || 0) < Number(qty)) return res.status(409).json({ error: `Only ${variant.stock} item(s) available in size ${size}` });
+  }
+
   const { data: rows } = await supabaseAdmin
     .from("cart_items").select("id,qty,size,color")
     .eq("user_id", req.user.id).eq("product_id", product_id);
