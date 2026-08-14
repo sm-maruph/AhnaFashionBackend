@@ -1,7 +1,7 @@
 {
-  "name": "rainzlifestyle-api",
+  "name": "ahnaf-fashion-api",
   "version": "1.0.0",
-  "description": "RAINZLIFESTYLE backend (Express + Supabase)",
+  "description": "Ahnaf Fashion backend (Express + Supabase)",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {

@@ -1,4 +1,4 @@
-# RAINZLIFESTYLE API (Express + Supabase)
+# Ahnaf Fashion API (Express + Supabase)
 
 Backend that serves the React storefront and admin panel. Talks to Supabase
 Postgres (RLS) and Storage. Optimizes images (WebP) before storing.
