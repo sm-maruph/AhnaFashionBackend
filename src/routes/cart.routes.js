@@ -10,7 +10,7 @@ router.use(authenticate); // cart is always user-scoped
 router.get("/", asyncHandler(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from("cart_items")
-    .select("id,size,color,qty,product:products(id,slug,name,image,price,old_price,stock)")
+    .select("id,size,color,qty,product:products(id,slug,name,image,colors,price,old_price,stock,product_images(url,position))")
     .eq("user_id", req.user.id)
     .order("created_at", { ascending: true });
   if (error) throw error;
