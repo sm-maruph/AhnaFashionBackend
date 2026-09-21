@@ -7,9 +7,9 @@ const { upload } = require("../middleware/upload");
 const { processMany, storagePathFromPublicUrl } = require("../utils/image");
 const { supabaseAdmin } = require("../config/supabase");
 const { productCreate, productUpdate, listQuery } = require("../validators/schemas");
+const { createProduct } = require("../utils/createProduct");
 
 const router = express.Router();
-const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 const asArray = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
 const asJson = (v) => { if (Array.isArray(v)) return v; try { return JSON.parse(v || "[]"); } catch { return []; } };
 const withSizeVariants = async (products) => {
@@ -134,14 +134,13 @@ router.post("/", authenticate, requireAdmin, upload.array("images", 8),
     // 2) insert product
     const insert = {
       name: b.name, brand: b.brand, description: b.description,
-      slug: b.slug || slugify(b.name),
+      slug: b.slug,
       category_id: b.category_id || null, subcategory_id: b.subcategory_id || null,
       price: b.price, old_price: b.old_price ?? null, stock: b.stock, size_chart_id: b.size_chart_id || null,
       sizes: asArray(b.sizes), colors: asJson(b.colors), tags: asArray(b.tags),
       image: uploaded[0]?.url || null,
     };
-    const { data: product, error } = await supabaseAdmin.from("products").insert(insert).select().single();
-    if (error) throw error;
+    const product = await createProduct(supabaseAdmin, insert);
     await saveSizeVariants(product.id, b.size_variants);
 
     // 3) gallery rows
